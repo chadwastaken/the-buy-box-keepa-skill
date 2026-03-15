@@ -1,0 +1,10 @@
+{
+  "name": "the-buy-box-keepa",
+  "description": "Keepa API reference and integration assistant for Amazon sellers. Provides endpoint docs, data object schemas, practical examples, and common patterns for building Keepa-powered tools.",
+  "version": "1.0.0",
+  "author": {
+    "name": "The Buy Box"
+  },
+  "homepage": "https://thebuybox.com",
+  "license": "MIT"
+}
