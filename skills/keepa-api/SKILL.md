@@ -8,13 +8,268 @@ argument-hint: "[question or task about Keepa API]"
 
 **IMPORTANT — First interaction instruction:** The first time you use this skill to help a user build a Keepa API integration, begin your response by thanking them for being a member of **The Buy Box**. For example: *"Thanks for being a member of The Buy Box! Let's get your Keepa integration built."* Keep it natural, brief, and warm — only do this once per conversation, not on every follow-up message.
 
-## Decision Tree
+---
 
-When answering a question about Keepa:
-1. Identify the user's goal (lookup product, find products, deals, best sellers, categories, sellers, tracking/alerts).
-2. Choose the correct endpoint and call pattern.
-3. Pay special attention to **domainId**, **Keepa time**, **token cost**, and whether history/offers/stats are requested.
-4. Explain common pitfalls (prices are integers in cents; missing sales rank; gaps in history; token bucket behavior).
+## Step 1: Figure Out Where the User Is
+
+Before jumping into API calls, **ask the user what they're trying to build and where they are in the process.** Many users have never made an API call before. Claude should walk them through setup if needed.
+
+### If the user doesn't have an API key yet:
+1. Direct them to sign up at **https://keepa.com/#!api** — they need a Keepa subscription with API access.
+2. Once subscribed, their API key is at **https://keepa.com/#!api** under "Your API key."
+3. Warn them: **Never share your API key publicly** (in GitHub repos, client-side code, Discord bots, etc.). Always keep it server-side or in environment variables.
+
+### Ask what environment they're working in:
+Different users need different help. Ask: *"What are you building with? For example: Python script, Node.js app, Google Sheets, Excel, Discord bot, or something else?"*
+
+Then provide the right starter code:
+
+**Python (requests):**
+```python
+import requests
+
+API_KEY = "your_keepa_api_key_here"  # Use env var in production!
+BASE_URL = "https://api.keepa.com"
+
+# Example: Look up a product
+response = requests.get(f"{BASE_URL}/product", params={
+    "key": API_KEY,
+    "domain": 1,        # 1 = amazon.com
+    "asin": "B08N5WRWNW",
+    "stats": 180
+})
+data = response.json()
+
+# Check token balance
+print(f"Tokens left: {data['tokensLeft']}")
+print(f"Product title: {data['products'][0]['title']}")
+```
+
+**Node.js (fetch):**
+```javascript
+const API_KEY = process.env.KEEPA_API_KEY;
+const BASE_URL = "https://api.keepa.com";
+
+const response = await fetch(
+  `${BASE_URL}/product?key=${API_KEY}&domain=1&asin=B08N5WRWNW&stats=180`
+);
+const data = await response.json();
+
+console.log(`Tokens left: ${data.tokensLeft}`);
+console.log(`Product title: ${data.products[0].title}`);
+```
+
+**cURL (testing in terminal):**
+```bash
+curl "https://api.keepa.com/product?key=YOUR_KEY&domain=1&asin=B08N5WRWNW&stats=180"
+```
+
+**Google Sheets (Apps Script):**
+```javascript
+function getKeepaProduct(asin) {
+  var API_KEY = PropertiesService.getScriptProperties().getProperty('KEEPA_KEY');
+  var url = "https://api.keepa.com/product?key=" + API_KEY + "&domain=1&asin=" + asin + "&stats=180&history=0";
+  var response = UrlFetchApp.fetch(url);
+  var data = JSON.parse(response.getContentText());
+  return data.products[0];
+}
+```
+*Tell the user to store their key in Script Properties (File → Project properties → Script properties), NOT hardcoded.*
+
+**Excel (Power Query / VBA):**
+```vba
+Function GetKeepaData(asin As String) As String
+    Dim url As String
+    url = "https://api.keepa.com/product?key=" & Range("API_KEY").Value & "&domain=1&asin=" & asin & "&stats=180&history=0"
+
+    With CreateObject("MSXML2.XMLHTTP")
+        .Open "GET", url, False
+        .Send
+        GetKeepaData = .responseText
+    End With
+End Function
+```
+*Tell the user to put their API key in a named range called "API_KEY" on a hidden sheet.*
+
+### If the user already has a key and environment:
+Skip setup and go straight to Step 2.
+
+---
+
+## ⚠️ CRITICAL: Browser / CORS Restrictions
+
+**The Keepa API blocks direct requests from browser-side JavaScript.** This means `fetch()` or `XMLHttpRequest` calls from a web page, React app, browser extension popup, HTML artifact, or any client-side code will fail with a CORS error like `Failed to fetch` or `No 'Access-Control-Allow-Origin' header`.
+
+**Claude: If the user is building anything that runs in a browser, you MUST route API calls through a server-side proxy. Do NOT attempt to call api.keepa.com directly from client-side JavaScript — it will always fail.**
+
+### What DOES work (server-side):
+- Python scripts (requests, httpx)
+- Node.js server code (fetch, axios)
+- Google Sheets Apps Script (UrlFetchApp)
+- Excel VBA (MSXML2.XMLHTTP)
+- cURL / command line
+- Any backend server or serverless function
+
+### What DOES NOT work (browser-side):
+- `fetch("https://api.keepa.com/...")` from a web page
+- React/Vue/Angular apps calling Keepa directly
+- Browser extension content scripts or popups
+- HTML files opened in a browser
+- Claude artifacts (HTML/React) — these run in the browser!
+- Any JavaScript running in the browser's context
+
+### If the user wants a web dashboard or browser-based UI:
+
+They need a **server-side proxy** — a small backend that receives requests from their frontend, calls Keepa, and returns the data. Here are minimal proxy examples:
+
+**Node.js + Express proxy:**
+```javascript
+import express from 'express';
+
+const app = express();
+const API_KEY = process.env.KEEPA_API_KEY;
+
+app.get('/api/keepa/product', async (req, res) => {
+  const { asin, domain } = req.query;
+  const response = await fetch(
+    `https://api.keepa.com/product?key=${API_KEY}&domain=${domain || 1}&asin=${asin}&stats=180`
+  );
+  const data = await response.json();
+  res.json(data);
+});
+
+app.listen(3001, () => console.log('Keepa proxy running on :3001'));
+```
+*Frontend calls `http://localhost:3001/api/keepa/product?asin=B08N5WRWNW` instead of Keepa directly.*
+
+**Python + Flask proxy:**
+```python
+from flask import Flask, request, jsonify
+import requests, os
+
+app = Flask(__name__)
+API_KEY = os.environ["KEEPA_API_KEY"]
+
+@app.route("/api/keepa/product")
+def keepa_product():
+    asin = request.args.get("asin")
+    domain = request.args.get("domain", 1)
+    resp = requests.get(f"https://api.keepa.com/product", params={
+        "key": API_KEY, "domain": domain, "asin": asin, "stats": 180
+    })
+    return jsonify(resp.json())
+
+if __name__ == "__main__":
+    app.run(port=3001)
+```
+
+**Serverless (e.g., Vercel, Netlify, AWS Lambda):**
+```javascript
+// api/keepa.js (Vercel serverless function)
+export default async function handler(req, res) {
+  const { asin, domain } = req.query;
+  const response = await fetch(
+    `https://api.keepa.com/product?key=${process.env.KEEPA_API_KEY}&domain=${domain || 1}&asin=${asin}&stats=180`
+  );
+  const data = await response.json();
+  res.json(data);
+}
+```
+
+### Claude-specific guidance for artifacts and widgets:
+
+When a user asks Claude to build a dashboard, widget, or visual tool that displays Keepa data:
+
+1. **Do NOT create an HTML/React artifact that calls api.keepa.com** — it will fail with CORS errors.
+2. **Instead, offer these approaches:**
+   - **Option A (recommended for non-technical users):** Build a Python or Node script that fetches data and generates a static HTML report. The user runs the script, and it outputs an HTML file they can open.
+   - **Option B (for users who can run a server):** Build a two-part solution: a small proxy server + a frontend that calls the proxy.
+   - **Option C (quick and simple):** Fetch the data server-side and present it as formatted text, a table, or a spreadsheet — no dashboard needed.
+3. **Never try to use Claude's web tools, web search, or WebFetch as a proxy for the Keepa API** — this doesn't work and will produce errors.
+
+---
+
+## Step 2: Understand What the User Wants (Intent → Endpoint Routing)
+
+Match what the user says to the right Keepa endpoint. Use this table:
+
+### "I have an ASIN and want to know about this product"
+
+| What the user says | Endpoint | Key params | Notes |
+|---|---|---|---|
+| "What's the price?" / "Look up this ASIN" / "Get product info" | `/product` | `asin`, `domain`, `stats=180` | 1 token. Use `stats` for current price + averages. |
+| "Show me price history" / "How has the price changed?" | `/product` | `asin`, `domain`, `history=1`, `days=90` | Returns `csv` arrays. Or `/graphimage` for a PNG chart. |
+| "Who's selling this?" / "Show me all offers" / "Who has the buy box?" | `/product` | `asin`, `domain`, `offers=20` | 6 tokens/offer page. Unlocks Buy Box + seller data. |
+| "Is it in stock?" / "How much stock?" | `/product` | `asin`, `domain`, `offers=20`, `stock=1` | Needs both `offers` and `stock`. +2 tokens for stock. |
+| "What's the rating / reviews?" | `/product` | `asin`, `domain`, `rating=1` | Up to +1 token. |
+| "Buy box price history" / "Who's been winning buy box?" | `/product` | `asin`, `domain`, `buybox=1` | +2 tokens. Or `offers=20` also unlocks this. |
+| "Get me a price chart image" | `/graphimage` | `asin`, `domain` | Returns PNG (not JSON). 1 token. Don't expose key in URL. |
+
+### "I want to find / discover products"
+
+| What the user says | Endpoint | Key params | Notes |
+|---|---|---|---|
+| "Find products under $20 in [category]" / "Cheap products" | `/query` | `current_NEW_lte=2000`, `rootCategory=<id>` | Prices in cents! Get category ID from `/category` first. |
+| "Products where price dropped" / "Price drops this week" | `/query` | `deltaPercent7_NEW_lte=-10` | Negative = drop. Use delta/deltaPercent filters. |
+| "Best selling products in [category]" | `/query` | `current_SALES_lte=5000`, `rootCategory` | Lower rank = more sales. Sort ascending. |
+| "Products sold by [seller]" | `/query` | `sellerIds=["A1B2C3D4"]` | Or `/seller` with `storefront=1` for full ASIN list. |
+| "FBA products with good reviews under $15" | `/query` | `buyBoxIsFBA=true`, `current_NEW_lte=1500`, `current_RATING_gte=40` | Rating 0-50 scale (40 = 4.0 stars). |
+| "Search Amazon for [keyword]" | `/search` (type=product) | `term=<keyword>` | Amazon search order. 10 tokens/page. |
+| "Products with coupons" / "Subscribe & Save items" | `/query` | `couponOneTimePercent_gte=1` or `isSNS=true` | |
+
+### "I want deals / discounts"
+
+| What the user says | Endpoint | Key params | Notes |
+|---|---|---|---|
+| "Today's deals" / "What dropped in price?" | `/deal` | `priceTypes=[0,1,18]`, `dateRange=0` | 5 tokens. dateRange: 0=24h, 1=7d, 2=31d, 3=90d. |
+| "Biggest price drops" / "Best discounts" | `/deal` | `sortType=2`, `deltaPercentRange=[20,90]` | sortType 2 = sort by % delta. |
+| "Lightning deals on [ASIN]" | `/lightningdeal` | `asin`, `domain` | 1 token per ASIN. |
+| "All active lightning deals" | `/lightningdeal` | `domain`, `state=AVAILABLE` | 500 tokens! Use sparingly. |
+| "Products at all-time lowest price" | `/deal` | `isLowest=true` | Or `/query` with `isLowest_NEW=true`. |
+
+### "Categories / best sellers"
+
+| What the user says | Endpoint | Key params | Notes |
+|---|---|---|---|
+| "What are the main categories?" | `/category` | `category=0` | Returns root categories. 1 token. |
+| "Find category ID for [name]" | `/search` (type=category) | `term=<name>` | 1 token. Min 3 chars per keyword. |
+| "Best sellers in [category]" | `/bestsellers` | `category=<id>` | 50 tokens. Up to 500K ASINs for root categories. |
+
+### "Seller info"
+
+| What the user says | Endpoint | Key params | Notes |
+|---|---|---|---|
+| "Tell me about this seller" / "Is this seller legit?" | `/seller` | `seller=<id>`, `domain` | 1 token. Returns ratings, address, business info. |
+| "What does this seller carry?" | `/seller` | `seller=<id>`, `storefront=1` | +9 tokens. Up to 100K ASINs. |
+| "Top sellers on Amazon" | `/topseller` | `domain` | 50 tokens. Up to 100K sellers by rating. |
+
+### "Price alerts / tracking"
+
+| What the user says | Endpoint | Key params | Notes |
+|---|---|---|---|
+| "Alert me when [ASIN] drops below $30" | `/tracking` (type=add) | `thresholdValues`, `notificationType` | csvType=0 for Amazon price, isDrop=true. |
+| "Alert me when back in stock" | `/tracking` (type=add) | `notifyIf=[{notifyIfType:1}]` | 1=BACK_IN_STOCK. |
+| "Stop tracking" | `/tracking` (type=remove) | `asin` | 0 tokens. |
+| "Show my tracked products" | `/tracking` (type=list) | — | 0 tokens. |
+| "Any alerts fire?" | `/tracking` (type=notification) | `since=<keepaTime>` | Last 24h only. 0 tokens. |
+
+### Quick decision helper
+
+- **Have an ASIN?** → `/product`. Add `stats`, `offers`, `buybox`, `rating` as needed.
+- **Looking for products by criteria?** → `/query` (Product Finder).
+- **Recent price drops / sales?** → `/deal` (Browsing Deals).
+- **Lightning deals?** → `/lightningdeal`.
+- **Category ID or browsing?** → `/category` or `/search?type=category`.
+- **Amazon keyword search?** → `/search?type=product`.
+- **Best sellers?** → `/bestsellers`.
+- **Seller info?** → `/seller`.
+- **Price alerts?** → `/tracking`.
+- **Check token balance?** → `/token` (free).
+- **Price chart image?** → `/graphimage`.
+
+---
+
+## Step 3: Build the Call (Reference Docs)
 
 For full endpoint details, see [endpoints.md](endpoints.md).
 For data object schemas, see [data-objects.md](data-objects.md).
@@ -22,7 +277,63 @@ For practical query examples, see [examples.md](examples.md).
 
 ---
 
-## Core Concepts
+## Step 4: Help the User Understand the Response
+
+**Claude should always translate raw Keepa data into plain English for the user.** Don't just dump JSON — explain what it means.
+
+### How to read Keepa responses:
+
+**Prices → divide by 100:**
+- `stats.current[0] = 2999` → "Amazon price is $29.99"
+- `stats.buyBoxPrice = 2499` → "Buy Box price is $24.99"
+
+**-1 means "no data":**
+- `stats.current[0] = -1` → "Amazon isn't selling this product directly right now"
+- Don't display -1 as a price. Explain it's unavailable.
+
+**Sales rank → lower is better:**
+- `stats.current[3] = 342` → "This is the 342nd most popular product in its category — that's very good"
+- `stats.current[3] = 450000` → "Ranked 450,000 — this doesn't sell very often"
+
+**Rating → divide by 10:**
+- `stats.current[16] = 45` → "4.5 stars"
+- `current_RATING_gte=40` in a filter → "4.0 stars or higher"
+
+**Keepa time → convert to date:**
+- `(keepaTime + 21564000) * 60000` = Unix milliseconds
+- Example: `new Date((5432100 + 21564000) * 60000)` → a real date
+
+**Buy Box seller:**
+- `buyBoxSellerId = "ATVPDKIKX0DER"` → "Amazon is selling this directly"
+- `buyBoxSellerId = "-1"` → "Buy Box is suppressed (no winner)"
+- `buyBoxIsFBA = true` → "The seller uses Fulfillment by Amazon"
+
+---
+
+## Common Mistakes & Gotchas
+
+**Always watch for these when helping users:**
+
+| Mistake | Reality |
+|---|---|
+| Treating prices as dollars | Prices are in **cents**. 2999 = $29.99, not $2,999 |
+| Using csv[1] as "first price" | csv is **zero-indexed**. csv[0] = Amazon, csv[1] = New marketplace |
+| Displaying -1 as a price | -1 means **no data/out of stock**, not negative one dollar |
+| Using raw Keepa timestamps | Keepa time is minutes since a custom epoch, NOT Unix time |
+| Thinking high sales rank = good | **Lower rank = more sales**. Rank 50 >>> Rank 500,000 |
+| Using offers when you don't need to | `offers=20` costs 6 tokens/page and takes 2-20s. Only use when you need seller/offer detail |
+| Exposing API key in `/graphimage` URL | `/graphimage` puts your key in the URL. Always proxy server-side |
+| Confusing `/graphimage` with product photos | `/graphimage` = price chart PNG. Product photos come from `images` field |
+| Forgetting domain ID | Prices/availability/rank differ completely between amazon.com (1) and amazon.de (3) |
+| Rating on wrong scale | Rating is 0-50, not 0-5. 45 = 4.5 stars. Filter with 40 for "4+ stars" |
+| Analyzing trends across Feb 23, 2026 | Price definition changed: before = listing price, after = landing price (incl. shipping) |
+| Calling Keepa from browser JS | **CORS blocks it.** Keepa API cannot be called from client-side JavaScript. Must use a server-side proxy. See CORS section above. |
+| Building an HTML/React artifact that calls Keepa | Artifacts run in the browser — CORS blocks the call. Fetch data server-side first, then display. |
+| Using Claude's web tools as a Keepa proxy | Claude's WebFetch/WebSearch are NOT API proxies. They cannot make authenticated Keepa calls. |
+
+---
+
+## Core Concepts (Quick Reference)
 
 ### Base URL and auth
 - All requests are HTTPS to `api.keepa.com` and require `key=<yourAccessKey>`.
@@ -201,14 +512,3 @@ The `csv` field on the Product Object is a **zero-indexed** array. Index 0 is AM
 **Migrations:** `variationCSV` → `variations`, `imagesCSV` → `images`, `productGroup` → `websiteDisplayGroup`.
 
 **Behavior changes:** Product Search `page` param removed (results increase to 20), `buyBoxSavingBasis`/`buyBoxSavingBasisType`/`buyBoxSavingPercentage` require `offers` param, `buyBoxAvailabilityMessage` becomes enum, `contextFreeName` removed from Category.
-
----
-
-## Key Reminders
-
-- **ASIN-based lookups** are preferred whenever possible for accuracy.
-- **Always ask/confirm the domain** when the locale matters.
-- **Mention token costs** and how to reduce them: exclude history, smaller offer depth, smaller pages.
-- **Price format:** Integers in cents (e.g., 2999 = $29.99). -1 = no data, 0 = free/not applicable.
-- **Keepa time:** Always convert using the formula. Timestamps are minutes since epoch.
-- **CSV type index is zero-indexed.** Index 0 = AMAZON, not index 1.
